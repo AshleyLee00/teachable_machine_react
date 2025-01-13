@@ -1,9 +1,9 @@
-<p align="center">
-  <img src="image.png" alt="Teachable Machine React Demo" width="100%">
-</p>
+
 
 # Teachable Machine React
-
+<p align="center">
+  <img src="teachable-machine-full.png" alt="codewalks" width="100%">
+</p>
 Google의 Teachable Machine을 React로 구현한 웹 애플리케이션입니다. 이 프로젝트는 TensorFlow.js를 사용하여 브라우저에서 직접 머신러닝 모델을 학습하고 테스트할 수 있습니다.
 
 ## 주요 기능
@@ -45,6 +45,9 @@ yarn start
 ```
 
 ## 사용 방법
+<p>
+   <img src="image.png" alt="Teachable Machine React Demo" width="100%">
+   </p>
 
 1. **클래스 추가**
    - '+ Add New Class' 버튼을 클릭하여 새로운 클래스 추가
@@ -55,6 +58,7 @@ yarn start
    - 각 클래스당 충분한 수의 샘플 확보 권장
 
 3. **모델 학습**
+   
    - 학습 설정 조정 (에포크, 배치 크기, 학습률)
    - '모델 학습시키기' 버튼 클릭
    - 실시간으로 학습 진행 상황, 손실값, 정확도 확인
@@ -82,16 +86,4 @@ yarn start
 
 ## 라이선스
 
-이 프로젝트는 MIT 라이선스를 따릅니다.
-
-## 기여하기
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 문의
-
-프로젝트에 대한 문의나 제안사항이 있으시다면 이슈를 생성해주세요.
+MIT
