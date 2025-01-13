@@ -29,6 +29,13 @@ const TeachableMachine = () => {
   const streamRef = useRef(null);
   const fileInputRefs = useRef([]);
 
+  // 훈련 상태를 위한 상태 추가
+  const [trainingStatus, setTrainingStatus] = useState({
+    epoch: 0,
+    loss: 0,
+    accuracy: 0
+  });
+
   useEffect(() => {
     fileInputRefs.current = classes.map(() => React.createRef());
   }, [classes]);
@@ -86,52 +93,53 @@ const TeachableMachine = () => {
 
   // 모델 훈련
   const trainModel = async () => {
-    try {
-      setIsTraining(true);
-      setTrainStatus('데이터 준비 중...');
+    if (!baseModel || classes.every(c => c.samples.length === 0)) return;
 
-      const data = await prepareData();
+    setIsTraining(true);
+    setTrainingStatus({ epoch: 0, loss: 0, accuracy: 0 });
+
+    try {
+      // 데이터 준비
+      const { xs, ys } = await prepareData();
       
-      // 새로운 모델 생성
-      const model = tf.sequential({
+      // 모델 설정
+      const layer = baseModel.getLayer('conv_pw_13_relu');
+      const newModel = tf.sequential({
         layers: [
-          tf.layers.dense({
-            inputShape: [1024],
-            units: 128,
-            activation: 'relu'
-          }),
-          tf.layers.dropout({ rate: 0.5 }),
-          tf.layers.dense({
-            units: classes.length,
-            activation: 'softmax'
-          })
+          tf.layers.globalAveragePooling2d({ inputShape: layer.outputShape.slice(1) }),
+          tf.layers.dense({ units: classes.length, activation: 'softmax' })
         ]
       });
 
-      // 모델 컴파일
-      model.compile({
+      // 컴파일
+      newModel.compile({
         optimizer: tf.train.adam(trainSettings.learningRate),
         loss: 'categoricalCrossentropy',
-        metrics: ['accuracy'],
+        metrics: ['accuracy']
       });
 
-      // 훈련 진행
-      setTrainStatus('모델 훈련 중...');
-      await model.fit(data.xs, data.ys, {
+      // 훈련 시작
+      await newModel.fit(xs, ys, {
         epochs: trainSettings.epochs,
         batchSize: trainSettings.batchSize,
-        callbacks: tfvis.show.fitCallbacks(
-          { name: '훈련 과정' },
-          ['loss', 'acc'],
-          { height: 200, callbacks: ['onEpochEnd'] }
-        )
+        callbacks: {
+          onEpochEnd: async (epoch, logs) => {
+            // 실시간으로 훈련 상태 업데이트
+            setTrainingStatus({
+              epoch: epoch + 1,
+              loss: logs.loss,
+              accuracy: logs.acc
+            });
+            // UI 업데이트를 위한 지연
+            await tf.nextFrame();
+          }
+        }
       });
 
-      setModel(model);
-      setTrainStatus('훈련 완료!');
+      setModel(newModel);
     } catch (error) {
-      console.error('훈련 중 오류:', error);
-      setTrainStatus('훈련 실패');
+      console.error('훈련 오류:', error);
+      alert('모델 훈련 중 오류가 발생했습니다.');
     } finally {
       setIsTraining(false);
     }
@@ -149,36 +157,38 @@ const TeachableMachine = () => {
     }
   };
 
-  // predict 함수 수정
-  const predict = useCallback(async (videoElement) => {
-    if (!model || !baseModel) return null;
+  // 성능 최적화를 위한 상수 정의
+  const PREDICTION_INTERVAL = 100; // 예측 간격 (ms)
+  const IMAGE_SIZE = 224; // 모델 입력 크기
+
+  // predict 함수 최적화
+  const predict = async (image) => {
+    if (!model) return null;
 
     try {
-      const tensor = tf.tidy(() => {
-        const img = tf.browser.fromPixels(videoElement);
-        const resized = tf.image.resizeBilinear(img, [224, 224]);
-        const normalized = resized.toFloat().div(tf.scalar(127.5)).sub(tf.scalar(1));
-        return normalized.expandDims(0);
+      // 메모리 최적화를 위해 tidy 사용
+      return await tf.tidy(() => {
+        const tensor = tf.browser.fromPixels(image)
+          .resizeNearestNeighbor([IMAGE_SIZE, IMAGE_SIZE])
+          .toFloat()
+          .div(255.0)  // 정규화
+          .expandDims();
+        
+        const predictions = model.predict(tensor);
+        const probabilities = predictions.dataSync();
+        const maxProbability = Math.max(...probabilities);
+        const classIndex = probabilities.indexOf(maxProbability);
+
+        return {
+          className: classes[classIndex].name,
+          probability: maxProbability
+        };
       });
-
-      const activation = baseModel.infer(tensor, 'conv_preds');
-      const predictions = await model.predict(activation).data();
-      
-      const maxProbability = Math.max(...predictions);
-      const predictedClass = predictions.indexOf(maxProbability);
-
-      tensor.dispose();
-      activation.dispose();
-
-      return {
-        className: classes[predictedClass].name,
-        probability: maxProbability
-      };
     } catch (error) {
       console.error('예측 오류:', error);
       return null;
     }
-  }, [model, baseModel, classes]);
+  };
 
   // 실시간 예측 효과 추가
   useEffect(() => {
@@ -404,72 +414,94 @@ const TeachableMachine = () => {
   // 미리보기 시작 함수
   const startPreview = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        } 
+      // 이미 활성화된 스트림이 있다면 중지
+      if (previewVideoRef.current?.srcObject) {
+        stopPreview();
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: 'user',
+          frameRate: { ideal: 30 }  // 프레임레이트 설정
+        }
       });
 
       if (previewVideoRef.current) {
         previewVideoRef.current.srcObject = stream;
-        previewVideoRef.current.play();
-        previewStreamRef.current = stream;
-        setIsPreviewActive(true);
-        startPreviewPrediction();
+        previewVideoRef.current.onloadeddata = () => {
+          setIsPreviewActive(true);
+          startPreviewPrediction();
+        };
       }
     } catch (err) {
-      console.error('미리보기 카메라 접근 오류:', err);
-      alert('카메라를 시작할 수 없습니다.');
+      console.error('웹캠 시작 오류:', err);
+      alert('웹캠을 시작할 수 없습니다. 카메라 권한을 확인해주세요.');
     }
   };
 
   // 미리보기 중지 함수
-  const stopPreview = () => {
-    if (previewStreamRef.current) {
-      previewStreamRef.current.getTracks().forEach(track => track.stop());
-      setIsPreviewActive(false);
-      setPreviewPrediction(null);
+  const stopPreview = useCallback(() => {
+    if (previewVideoRef.current?.srcObject) {
+      const tracks = previewVideoRef.current.srcObject.getTracks();
+      tracks.forEach(track => track.stop());
+      previewVideoRef.current.srcObject = null;
     }
-  };
+    setIsPreviewActive(false);
+    setPreviewPrediction(null);
+    // 메모리 정리
+    tf.disposeVariables();
+  }, []);
 
-  // 실시간 예측 함수
-  const startPreviewPrediction = async () => {
-    if (!model || !baseModel || !previewVideoRef.current) return;
+  // 컴포넌트 언마운트 시 정리
+  useEffect(() => {
+    return () => {
+      stopPreview();
+    };
+  }, [stopPreview]);
 
-    const predictFrame = async () => {
-      if (!isPreviewActive) return;
+  // 예측 함수 최적화
+  const startPreviewPrediction = () => {
+    if (!model || !previewVideoRef.current) return;
 
-      try {
-        const videoElement = previewVideoRef.current;
-        const tensor = tf.tidy(() => {
-          const img = tf.browser.fromPixels(videoElement);
-          const resized = tf.image.resizeBilinear(img, [224, 224]);
-          const normalized = resized.toFloat().div(tf.scalar(127.5)).sub(tf.scalar(1));
-          return normalized.expandDims(0);
-        });
+    let lastPredictionTime = 0;
+    let animationFrameId;
+    let isProcessing = false;
 
-        const activation = baseModel.infer(tensor, true);
-        const prediction = await model.predict(activation).data();
-        
-        const maxProbability = Math.max(...prediction);
-        const predictedClass = prediction.indexOf(maxProbability);
-
-        setPreviewPrediction({
-          className: classes[predictedClass].name,
-          probability: maxProbability
-        });
-
-        tensor.dispose();
-        activation.dispose();
-
-        requestAnimationFrame(predictFrame);
-      } catch (error) {
-        console.error('예측 오류:', error);
+    const predictFrame = async (timestamp) => {
+      if (!isPreviewActive || !previewVideoRef.current) {
+        cancelAnimationFrame(animationFrameId);
+        return;
       }
+
+      // 예측 간격 조절
+      if (timestamp - lastPredictionTime > PREDICTION_INTERVAL && !isProcessing) {
+        isProcessing = true;
+        const videoElement = previewVideoRef.current;
+
+        if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+          try {
+            const prediction = await predict(videoElement);
+            if (prediction) {
+              setPreviewPrediction(prediction);
+            }
+          } catch (error) {
+            console.error('예측 오류:', error);
+          }
+          lastPredictionTime = timestamp;
+        }
+        isProcessing = false;
+      }
+
+      animationFrameId = requestAnimationFrame(predictFrame);
     };
 
-    requestAnimationFrame(predictFrame);
+    animationFrameId = requestAnimationFrame(predictFrame);
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+    };
   };
 
   // SVG 선 연결을 위한 스타일 추가
@@ -642,6 +674,41 @@ const TeachableMachine = () => {
                   {isTraining ? '훈련 중...' : '모델 학습시키기'}
                 </button>
 
+                {/* 훈련 진행 상태 표시 */}
+                {isTraining && (
+                  <div className="mt-4 p-4 bg-blue-50 rounded-md">
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-blue-700">진행 상태:</span>
+                        <span className="font-medium text-blue-800">
+                          {trainingStatus.epoch} / {trainSettings.epochs} 에포크
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-blue-700">손실값:</span>
+                        <span className="font-medium text-blue-800">
+                          {trainingStatus.loss.toFixed(4)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-blue-700">정확도:</span>
+                        <span className="font-medium text-blue-800">
+                          {(trainingStatus.accuracy * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      {/* 진행 바 */}
+                      <div className="w-full bg-blue-200 rounded-full h-2.5">
+                        <div 
+                          className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                          style={{ 
+                            width: `${(trainingStatus.epoch / trainSettings.epochs) * 100}%` 
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-6">
                   <h3 className="text-sm font-medium text-gray-900 mb-4">고급</h3>
                   <div className="space-y-4">
@@ -716,35 +783,38 @@ const TeachableMachine = () => {
                     웹캠으로 테스트하기
                   </button>
                 ) : (
-                  <div>
-                    <div className="relative">
-                      <video
-                        ref={previewVideoRef}
-                        autoPlay
-                        playsInline
-                        muted
-                        className="w-full rounded-lg"
-                      />
-                      {previewPrediction && (
-                        <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white p-4">
-                          <div className="flex justify-between items-center">
-                            <div>
+                  <div className="relative w-full aspect-video">
+                    <video
+                      ref={previewVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover rounded-lg"
+                      style={{ transform: 'scaleX(-1)' }}
+                    />
+                    <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white p-4">
+                      <div className="flex justify-between items-center">
+                        <div>
+                          {previewPrediction ? (
+                            <>
                               <div className="text-lg font-bold">
                                 {previewPrediction.className}
                               </div>
                               <div className="text-sm">
                                 신뢰도: {(previewPrediction.probability * 100).toFixed(1)}%
                               </div>
-                            </div>
-                            <button
-                              onClick={stopPreview}
-                              className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                            >
-                              중지
-                            </button>
-                          </div>
+                            </>
+                          ) : (
+                            <div className="text-sm">분석 중...</div>
+                          )}
                         </div>
-                      )}
+                        <button
+                          onClick={stopPreview}
+                          className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                        >
+                          중지
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
